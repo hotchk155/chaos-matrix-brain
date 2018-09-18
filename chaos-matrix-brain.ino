@@ -68,6 +68,40 @@ const uint8_t  gamma8[] = {
 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 };
 
+unsigned int h2rgb(unsigned int v1, unsigned int v2, unsigned int hue)
+{
+  if (hue < 60) return v1 * 60 + (v2 - v1) * hue;
+  if (hue < 180) return v2 * 60;
+  if (hue < 240) return v1 * 60 + (v2 - v1) * (240 - hue);
+  return v1 * 60;
+}
+
+int makeColor(unsigned int hue, unsigned int saturation, unsigned int lightness)
+{
+  unsigned int red, green, blue;
+  unsigned int var1, var2;
+
+  if (hue > 359) hue = hue % 360;
+  if (saturation > 100) saturation = 100;
+  if (lightness > 100) lightness = 100;
+
+  // algorithm from: http://www.easyrgb.com/index.php?X=MATH&H=19#text19
+  if (saturation == 0) {
+    red = green = blue = lightness * 255 / 100;
+  } else {
+    if (lightness < 50) {
+      var2 = lightness * (100 + saturation);
+    } else {
+      var2 = ((lightness + saturation) * 100) - (saturation * lightness);
+    }
+    var1 = lightness * 200 - var2;
+    red = h2rgb(var1, var2, (hue < 240) ? hue + 120 : hue - 240) * 255 / 600000;
+    green = h2rgb(var1, var2, hue) * 255 / 600000;
+    blue = h2rgb(var1, var2, (hue >= 120) ? hue - 120 : hue + 240) * 255 / 600000;
+  }
+  return (red << 16) | (green << 8) | blue;
+}
+
 // define pins
 #define P_PWM4  23 
 #define P_PWM2  22
@@ -77,6 +111,7 @@ const uint8_t  gamma8[] = {
 #define P_CKIN2 12
 #define P_CKIN3 19
 #define P_NOISEOUT 13
+#define P_VERT_DAT 0
 #define P_POT1 18
 #define P_POT2 19
 
@@ -95,12 +130,13 @@ void isr_input_change_3() {
 }
 
 
-void setRgbLeds() {
-    for (int x=0; x < ledsPerStrip; x++) {
-      for (int y=0; y < 8; y++) {
-        leds.setPixel(x + y*ledsPerStrip, 0);
-      }
+void setRgbLeds(int color, int k) {
+    for (int x=0; x < 10; x++) {
+        leds.setPixel(50+ x , 0);
     }
+     leds.setPixel(45+ k , color);
+     leds.setPixel(50+ k , color);
+     leds.setPixel(55+ k , color);
     leds.show();
 }
 
@@ -114,6 +150,16 @@ byte bmp[8] = {
   0b01000010,
   0b00000000
 };
+byte bmp2[8] = {
+  0b10011001,
+  0b01100110,
+  0b00011000,
+  0b11000011,
+  0b01011010,
+  0b00100101,
+  0b11111111,
+  0b00000000
+};
 void setup() {
   
 
@@ -123,6 +169,7 @@ void setup() {
   pinMode(P_POT1, INPUT);
   pinMode(P_POT2, INPUT);
   pinMode(P_NOISEOUT, OUTPUT);
+  pinMode(P_VERT_DAT, OUTPUT);
 
   pinMode(P_PWM4, OUTPUT);
 
@@ -132,7 +179,7 @@ void setup() {
   //attachInterrupt (P_CKIN3, isr_input_change_3, FALLING);  
   
   leds.begin();
-  setRgbLeds();
+  setRgbLeds(0,11);
   Serial.begin(9600);
 }
 
@@ -149,8 +196,13 @@ byte clock_count3 = 0;
  uint16_t lfsr = 1;
 uint16_t state = 0;
 
+byte update_strip = 0;
+byte vert_scan = 0;
 byte cycles = 0;
 byte bmpindex = 0;
+int twister = 0;
+    byte mode = 0;
+
 void loop() {
   /*if((freq_count_1^pwm_phase_1)&~3) {
     analogWrite(P_PWM1, (byte)(pwm_phase_1 >> 2));
@@ -166,24 +218,42 @@ byte clock3 = (CORE_PIN11_PINREG & CORE_PIN11_BITMASK); // pin 11
     clock_phase_1 = clock1;
     ++clock_count1;
     analogWrite(P_PWM1, gamma8[clock_count1]);
+
+    
   }
   
   if(clock_phase_2^clock2) {
     clock_phase_2 = clock2;
     ++clock_count2;
     analogWrite(P_PWM2, gamma8[clock_count2]);
+
+    /////////////////////////////////
+    if(mode & 1) {
+      if(++vert_scan >= 15) {
+        CORE_PIN0_PORTSET = CORE_PIN0_BITMASK; // OUT    
+        vert_scan = 0;
+      }
+      else {
+        CORE_PIN0_PORTCLEAR = CORE_PIN0_BITMASK; // OUT    
+      }
+    }
+    /////////////////////////////////
+
   }
+
+  /*
   if(cycles) {
     if(!--cycles) {
       CORE_PIN23_PORTCLEAR = CORE_PIN23_BITMASK; // LED    
     }
-  }
+  }*/
+
+  
   if(clock_phase_3^clock3) {
     clock_phase_3 = clock3;
     ++clock_count3;
     analogWrite(P_PWM3, gamma8[clock_count3]);
 
-    byte mode = 2;
     byte data_bit = 0;
     /*if(mode == 1) {
         // taps: 16 14 13 11; feedback polynomial: x^16 + x^14 + x^13 + x^11 + 1 
@@ -194,40 +264,68 @@ byte clock3 = (CORE_PIN11_PINREG & CORE_PIN11_BITMASK); // pin 11
         data_bit=1;
       }
     }*/
-    if(mode==2)
-    {
-      if(bmpindex > 63) 
-            bmpindex = 0;
-      data_bit = (bmp[bmpindex>>3]>>(bmpindex&7))&1;
-      ++bmpindex;
+    switch(mode/2) {
+      case 0:
+        data_bit = 0;
+        break;
+      case 1:
+        data_bit = 1;
+        break;
+      case 2:
+        if(bmpindex > 63) bmpindex = 0;
+        data_bit = (bmp[bmpindex>>3]>>(bmpindex&7))&1;
+        ++bmpindex;
+        break;
+      case 3:
+        if(bmpindex > 63) bmpindex = 0;
+        data_bit = (bmp2[bmpindex>>3]>>(bmpindex&7))&1;
+        ++bmpindex;
+        break;
     }
-    /*else
-    {
-      ++state;
-      data_bit = !(state&15);
-    }*/
 
+    int noise_density = analogRead(A4);
+    
+    analogWrite(23,noise_density/4);
         // taps: 16 14 13 11; feedback polynomial: x^16 + x^14 + x^13 + x^11 + 1 
       uint16_t b  = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5) ) & 1;
       lfsr =  (lfsr >> 1) | (b << 15);
-      uint16_t density = ((uint16_t)analogRead(A4))<<6;
+      uint16_t density = ((uint16_t)noise_density)<<6;
       if(lfsr<density) {
         data_bit^=1;
       }
+    
+    
+     
 
 
     if(data_bit) {
       CORE_PIN13_PORTSET = CORE_PIN13_BITMASK; // OUT
-      CORE_PIN23_PORTSET = CORE_PIN23_BITMASK; // LED
-      cycles = 255;
+      //CORE_PIN23_PORTSET = CORE_PIN23_BITMASK; // LED
+      if(!(mode & 1)) {
+        CORE_PIN0_PORTSET = CORE_PIN0_BITMASK; // OUT       
+      }
     } 
     else {
       CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK; // OUT
+      if(!(mode & 1)) {
+        CORE_PIN0_PORTCLEAR = CORE_PIN0_BITMASK; // OUT       
+      }
     }
   }
   
+  if(!++update_strip) {
+    int r = analogRead(A3);
+    
+    if(++twister > 1000) twister  = 0;
+    setRgbLeds(makeColor(r>>2, 255, 10), twister/100);
 
-
+    
+    int lower = 128*mode - 10;
+    int upper = 128*mode + 10;
+    if(r < lower || r > upper) {
+      mode = r/128; // 8 modes
+    }
+  }
 //  analogWrite(P_PWM4, gamma8[analogRead(A4)/8]);
 ///    Serial.print(analogRead(A4));
 //  Serial.print(",");
